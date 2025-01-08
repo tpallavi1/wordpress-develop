@@ -1,0 +1,68 @@
+version: 0.2
+
+env:
+  variables:
+    DB_NAME: wordpressdb
+    DB_USER: wpuser
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+      php: latest
+    commands:
+      - apt-get update
+      - apt-get install -y jq mysql-client 
+      - curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+      - chmod +x wp-cli.phar
+      - mv wp-cli.phar /usr/local/bin/wp
+      - ls -la
+      - which wp
+      - pwd
+      - node -v
+      - npm -v
+      - npm install --ignore-engines --force
+
+  pre_build:
+    commands:
+      - echo Starting pre-build phase
+      - npm run build
+      
+  build:
+    commands:
+      - echo Starting build phase
+      - wget https://wordpress.org/latest.tar.gz
+      - tar -xzf latest.tar.gz
+      - rm latest.tar.gz
+      # Use AWS_STACK_NAME from CodeBuild environment
+      - echo Stack name $AWS_STACK_NAME
+      - aws secretsmanager get-secret-value --secret-id wordpress.secrets.${AWS_STACK_NAME} --query SecretString --output text > db_secret.json
+      - cat db_secret.json | jq -r .DBPassword > db_password.txt
+      - export DB_PASSWORD=$(cat db_password.txt)
+      - aws secretsmanager get-secret-value --secret-id wordpress.auth.${AWS_STACK_NAME} --query SecretString --output text > auth_secret.json
+      - cat auth_secret.json | jq -r .AuthKeys > auth_keys.txt
+      - export WP_AUTH_KEYS=$(cat auth_keys.txt)
+      - aws cloudformation describe-stacks --stack-name ${AWS_STACK_NAME} --query Stacks[0].Outputs[?OutputKey==`RDSEndpoint`].OutputValue --output text > db_host.txt
+      - export DB_HOST=$(cat db_host.txt)
+      - cd wordpress
+      - cp wp-config-sample.php wp-config.php
+      - sed -i "s/database_name_here/$DB_NAME/" wp-config.php
+      - sed -i "s/username_here/$DB_USER/" wp-config.php
+      - sed -i "s/password_here/$DB_PASSWORD/" wp-config.php
+      - sed -i "s/localhost/$DB_HOST/" wp-config.php
+      - curl -L https://api.wordpress.org/secret-key/1.1/salt/ > wp-keys.txt
+      - sed -i "/#@-/,/#@+/c\\$(cat wp-keys.txt)" wp-config.php
+      - echo "define('WP_DEBUG', false);" >> wp-config.php
+      - echo "define('FORCE_SSL_ADMIN', true);" >> wp-config.php
+      - echo "if (strpos(\$_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) \$_SERVER['HTTPS']='on';" >> wp-config.php
+      
+  post_build:
+    commands:
+      - echo Build completed successfully
+
+artifacts:
+  files:
+    - wordpress/**/*
+    - appspec.yml
+    - scripts/**/*
+  discard-paths: no
